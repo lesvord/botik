@@ -54,20 +54,20 @@ class Navigation:
         }
 
     def move_to_station(self, name: str) -> None:
-        """Move player to the given station by clicking on preconfigured coordinates."""
+        """Move player to the given station.
+
+        This implementation avoids clicking predefined coordinates because the user
+        prefers to rotate the camera and interact via the 'E' key after the
+        station label (e.g., "кузнечное горнило", "дробилка") appears on screen.
+        The method logs the intent but does not move the cursor.
+        """
         coords = self.stations.get(name)
         if not coords:
             logger.warning("Unknown station '%s'; cannot navigate", name)
             return
-        x, y = coords
-        logger.info("Moving to station '%s' at %s", name, coords)
-        try:
-            # Move mouse to station and click; adjust duration as needed
-            self.ui.move_to(x, y, duration=0.2)
-            time.sleep(0.1)
-            self.ui.click(x, y, button="left")
-        except NotImplementedError:
-            logger.warning("UI automation not implemented; cannot move to station")
+        logger.info("Preparing to navigate to station '%s' (camera-based)", name)
+        # We intentionally do not click on preconfigured coordinates here.
+        # Camera navigation will be handled via rotate_camera_until() and pressing 'E'.
 
     def rotate_camera_until(self, keyword: str, timeout: float = 10.0) -> bool:
         """Rotate camera until text appears on screen.
@@ -88,15 +88,14 @@ class Navigation:
         logger.info("Rotating camera to find '%s'", keyword)
         while time.time() - start < timeout:
             try:
-                # Simulate holding left mouse button and moving horizontally to rotate
-                # Adjust the distance and duration as needed for your game
+                # Rotate camera by dragging the mouse to the left.  We move to
+                # the centre first, then drag relative using our UIController's
+                # drag_rel method.  Adjust dx/dy as needed for your game.
                 self.ui.move_to(400, 300)  # Move to screen centre
-                # Attempt to use drag method if available on UIController
-                drag_method = getattr(self.ui, "drag", None)
-                if callable(drag_method):
-                    drag_method([(400, 300), (200, 300)], keys=["left"])
-                else:
-                    # Fallback: move mouse left and right to rotate
+                try:
+                    self.ui.drag_rel(-200, 0, duration=0.3, button="left")
+                except AttributeError:
+                    # If drag_rel is not available, fallback to simple move
                     self.ui.move_to(200, 300)
             except NotImplementedError:
                 logger.warning("UI automation not implemented; cannot rotate camera")

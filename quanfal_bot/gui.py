@@ -58,6 +58,19 @@ class ItemConfig:
         "фиолетовый": "",
         "жёлтый": "",
     })
+    # Additional trigger images for this item.  These allow the bot to
+    # locate UI elements via template matching instead of relying on OCR.
+    # Supported keys:
+    #   item: template of the recipe/item name in the crafting list
+    #   create: template of the "Создать" button
+    #   empty_slot: template of an empty crafting output slot
+    #   inventory_slot: template of an empty inventory slot
+    triggers: Dict[str, str] = field(default_factory=lambda: {
+        "item": "",
+        "create": "",
+        "empty_slot": "",
+        "inventory_slot": "",
+    })
 
 
 @dataclass
@@ -81,6 +94,11 @@ class BotConfig:
     professions_order: List[str] = field(default_factory=lambda: ["blacksmithing", "jeweling", "tailoring"])
     # Delay (in seconds) between runs of different modules
     cycle_delay: float = 3.0
+    # Region of the crafting window containing output slots (left, top, width, height)
+    # This is used to detect empty or filled slots and should be calibrated in the GUI.
+    craft_window_region: Optional[List[int]] = None
+    # Region of the inventory where items are displayed (left, top, width, height)
+    inventory_region: Optional[List[int]] = None
 
     def to_file(self, path: str) -> None:
         """Serialize configuration to YAML file."""

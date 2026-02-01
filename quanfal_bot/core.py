@@ -22,6 +22,7 @@ import logging
 import os
 from pathlib import Path
 import time
+import threading
 from typing import Dict, List, Optional, Type
 
 from .gui import BotConfigGUI, BotConfig
@@ -150,7 +151,10 @@ def run_bot():
         save_config(config, config_path)
 
     # Instantiate helpers
-    ui = UIController()
+    # Create events to support stopping and pausing via hotkeys
+    stop_event = threading.Event()
+    pause_event = threading.Event()
+    ui = UIController(stop_event=stop_event, pause_event=pause_event)
     img = ImageRecognition(config)
     nav = Navigation(ui, img, config)
 
@@ -160,21 +164,51 @@ def run_bot():
         logger.info("No crafting modules enabled; exiting.")
         return
 
+    # Set up global hotkeys for stopping (F12) and pausing/resuming (F11)
+    try:
+        import keyboard  # type: ignore
+
+        # Define actions for stop and pause
+        def stop_bot():
+            stop_event.set()
+            logger.info("Stop hotkey pressed (F12). Finishing current action...")
+
+        def toggle_pause():
+            if pause_event.is_set():
+                pause_event.clear()
+                logger.info("Bot resumed (F11)")
+            else:
+                pause_event.set()
+                logger.info("Bot paused (F11)")
+
+        keyboard.add_hotkey('f12', stop_bot)
+        keyboard.add_hotkey('f11', toggle_pause)
+        logger.info("Hotkeys registered: F12 to stop, F11 to pause/resume")
+    except Exception as e:
+        logger.warning("Could not register hotkeys (F12/F11); stop/pause disabled: %s", e)
+
     logger.info("Starting bot with modules: %s", [m.__class__.__name__ for m in modules])
     try:
         # Main execution loop
-        while True:
+        while not stop_event.is_set():
             for module in modules:
+                if stop_event.is_set():
+                    break
                 logger.info("Executing module: %s", module)
                 try:
                     module.run_cycle()
                 except Exception as module_error:
                     logger.error("Error in module %s: %s", module, module_error)
-                    # We choose to continue other modules on error
-                # Short delay between modules to avoid heavy load
+                    # Continue other modules on error
+                # Delay between modules
+                if stop_event.is_set():
+                    break
                 time.sleep(config.cycle_delay)
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
+        logger.info("Bot stopped by user via KeyboardInterrupt.")
+    finally:
+        stop_event.set()
+        logger.info("Bot exiting.")
 
 
 if __name__ == "__main__":

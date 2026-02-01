@@ -70,6 +70,40 @@ class ImageRecognition:
                 else:
                     self._grade_templates[grade] = None
 
+        # Load trigger templates for each item.  Each item may specify
+        # additional image templates (e.g. item name, create button,
+        # empty slot, inventory slot).  These templates are stored in
+        # ``self.item_triggers`` as a list of dictionaries keyed by
+        # trigger name.
+        self.item_triggers: List[Dict[str, Optional[np.ndarray]]] = []
+        if hasattr(config, 'items'):
+            for item in config.items:
+                triggers_dict: Dict[str, Optional[np.ndarray]] = {}
+                # Ensure 'triggers' is present on item
+                trigger_conf = getattr(item, 'triggers', {}) or {}
+                for key, path in trigger_conf.items():
+                    if path:
+                        try:
+                            triggers_dict[key] = self._load_template(path)
+                        except Exception as e:
+                            logger.warning("Failed to load trigger template '%s' for key '%s': %s", path, key, e)
+                            triggers_dict[key] = None
+                    else:
+                        triggers_dict[key] = None
+                self.item_triggers.append(triggers_dict)
+
+        # Attempt to import pytesseract for OCR functionality.  OCR is used to
+        # locate UI elements by their textual labels (e.g., button captions or
+        # recipe names) when template matching is unavailable or insufficient.
+        try:
+            import pytesseract  # type: ignore
+            self._pytesseract = pytesseract
+            self._has_ocr = True
+        except Exception:
+            # If pytesseract is not available, OCR methods will not work
+            self._pytesseract = None
+            self._has_ocr = False
+
     @staticmethod
     def _load_template(path: str) -> np.ndarray:
         """Load an image file into a grayscale numpy array."""
@@ -193,3 +227,58 @@ class ImageRecognition:
         for (x, y) in zip(xloc, yloc):
             positions.append((left + x, top + y))
         return positions
+
+    # ------------------------------------------------------------------
+    # OCR METHODS
+    #
+    # The methods below rely on pytesseract to perform optical character
+    # recognition on screenshots.  This allows the bot to locate UI elements
+    # such as buttons or item names based solely on their text, without
+    # requiring pre‑captured templates.  If pytesseract is not installed,
+    # these methods will raise NotImplementedError.
+
+    def locate_text(self, screenshot: Image.Image, target_text: str, lang: str = "rus+eng") -> Optional[Tuple[int, int, int, int]]:
+        """
+        Find the first occurrence of ``target_text`` within the screenshot using OCR.
+
+        Parameters
+        ----------
+        screenshot : PIL.Image
+            The full‑colour screenshot to search.
+        target_text : str
+            The exact or partial text to look for (case‑insensitive).
+        lang : str
+            Languages to use for OCR (default "rus+eng").  You should
+            configure Tesseract with these language packs installed.
+
+        Returns
+        -------
+        Optional[Tuple[int, int, int, int]]
+            Returns the bounding box (x, y, w, h) of the first match, or
+            ``None`` if no match is found or OCR is unavailable.
+        """
+        if not self._has_ocr:
+            raise NotImplementedError("pytesseract is required for locate_text")
+        # Convert screenshot to RGB (pytesseract requires this format)
+        img_rgb = screenshot.convert("RGB")
+        # Perform OCR; request data with bounding boxes
+        try:
+            ocr_data = self._pytesseract.image_to_data(img_rgb, lang=lang, output_type=self._pytesseract.Output.DICT)
+        except Exception as e:
+            logger.warning("OCR failed: %s", e)
+            return None
+        target_lower = target_text.lower().strip()
+        # Iterate over detected words and find the first one containing the target
+        n_boxes = len(ocr_data.get("text", []))
+        for i in range(n_boxes):
+            text = ocr_data["text"][i]
+            if not text:
+                continue
+            if target_lower in text.lower():
+                x = ocr_data["left"][i]
+                y = ocr_data["top"][i]
+                w = ocr_data["width"][i]
+                h = ocr_data["height"][i]
+                logger.debug("Located text '%s' at (%s,%s,%s,%s)", text, x, y, w, h)
+                return (x, y, w, h)
+        return None
