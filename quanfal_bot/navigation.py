@@ -17,6 +17,14 @@ real logic as you adapt the bot for your environment.
 from __future__ import annotations
 
 import logging
+
+# Optional OCR support
+try:
+    import pytesseract  # type: ignore
+    _has_pytesseract = True
+except ImportError:
+    pytesseract = None  # type: ignore
+    _has_pytesseract = False
 import time
 from typing import Dict, Optional
 
@@ -83,27 +91,36 @@ class Navigation:
                 # Simulate holding left mouse button and moving horizontally to rotate
                 # Adjust the distance and duration as needed for your game
                 self.ui.move_to(400, 300)  # Move to screen centre
-                self.ui.drag = getattr(self.ui, "drag", None)
-                # If drag is available via pyautogui, we use it; otherwise do nothing
-                if self.ui.drag:
-                    self.ui.drag([(400, 300), (200, 300)], keys=["left"])
+                # Attempt to use drag method if available on UIController
+                drag_method = getattr(self.ui, "drag", None)
+                if callable(drag_method):
+                    drag_method([(400, 300), (200, 300)], keys=["left"])
                 else:
                     # Fallback: move mouse left and right to rotate
                     self.ui.move_to(200, 300)
             except NotImplementedError:
                 logger.warning("UI automation not implemented; cannot rotate camera")
                 return False
-            # Take a screenshot and search for the keyword using template matching or OCR
+            # Take a screenshot and search for the keyword using OCR
             try:
                 screenshot = self.ui.screenshot()
             except NotImplementedError:
                 logger.warning("Cannot take screenshot; rotation aborted")
                 return False
-            # Attempt to detect the keyword by matching templates
-            # For simplicity, we just log and return False here.
-            # You could extend this to run OCR or template matching on 'screenshot'.
-            logger.debug("Searching for keyword '%s' in screenshot (not implemented)", keyword)
+            # Perform OCR if available
+            found = False
+            if _has_pytesseract:
+                try:
+                    # Convert screenshot to text; force Russian language if available
+                    text = pytesseract.image_to_string(screenshot, lang="rus", config="--psm 6").lower()
+                    if keyword.lower() in text:
+                        logger.info("Detected keyword '%s' via OCR", keyword)
+                        return True
+                except Exception as e:
+                    logger.warning("OCR failed: %s", e)
+            # Could be extended with template matching here
+            # Wait briefly before continuing rotation
             time.sleep(0.5)
-            # For now, assume we never find the keyword in this dummy implementation
+        # Keyword not found within timeout
         logger.info("Failed to find '%s' within %.1f seconds", keyword, timeout)
         return False

@@ -35,17 +35,40 @@ class ImageRecognition:
 
     def __init__(self, config) -> None:
         self.config = config
-        # Preload template images for grade icons
+        # Support for both single‑item and multi‑item configurations.  If
+        # ``config`` has an ``items`` attribute, we assume it is a list of
+        # ``ItemConfig`` objects.  Otherwise, we fall back to a single set
+        # of grade icons on the config itself.
         self._grade_templates: Dict[str, Optional[np.ndarray]] = {}
-        for grade, path in config.grade_icons.items():
-            if path:
-                try:
-                    self._grade_templates[grade] = self._load_template(path)
-                except Exception as e:
-                    logger.warning("Failed to load grade template '%s': %s", path, e)
+        self.item_templates: List[Dict[str, Optional[np.ndarray]]] = []
+        # Multi‑item: load templates for each item
+        if hasattr(config, 'items'):
+            for item in config.items:
+                templates: Dict[str, Optional[np.ndarray]] = {}
+                for grade, path in item.grade_icons.items():
+                    if path:
+                        try:
+                            templates[grade] = self._load_template(path)
+                        except Exception as e:
+                            logger.warning("Failed to load grade template '%s': %s", path, e)
+                            templates[grade] = None
+                    else:
+                        templates[grade] = None
+                self.item_templates.append(templates)
+            # For backward compatibility, build a merged template dict of the first item
+            if self.item_templates:
+                self._grade_templates = self.item_templates[0].copy()
+        else:
+            # Single‑item fallback
+            for grade, path in getattr(config, 'grade_icons', {}).items():
+                if path:
+                    try:
+                        self._grade_templates[grade] = self._load_template(path)
+                    except Exception as e:
+                        logger.warning("Failed to load grade template '%s': %s", path, e)
+                        self._grade_templates[grade] = None
+                else:
                     self._grade_templates[grade] = None
-            else:
-                self._grade_templates[grade] = None
 
     @staticmethod
     def _load_template(path: str) -> np.ndarray:

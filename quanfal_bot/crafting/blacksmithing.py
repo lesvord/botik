@@ -28,26 +28,47 @@ class Blacksmithing(CraftingModule):
     name = "blacksmithing"
 
     def run_cycle(self) -> None:
-        logger.info("Starting blacksmithing cycle for %s", self.config.craft_item_name)
-        # 1. Move to forge
-        self.nav.move_to_station("forge")
-        time.sleep(1.0)
-        # 2. Open crafting interface (game‑specific: may require pressing a hotkey)
-        self.open_crafting_interface()
-        # 3. Select recipe
-        self.select_recipe(self.config.craft_item_name)
-        # 4. Initiate crafting
-        self.start_craft()
-        # 5. Collect items from output slots until bag is full
-        while True:
-            if not self.collect_items_from_output():
-                # If items remain in output after collection, we assume bag is full
-                self.handle_full_inventory()
-                break
-            # Continue crafting next batch if output was cleared successfully
-            time.sleep(0.5)
-            # Optionally click "Создать" again
-            self.start_craft()
+        """Perform a crafting cycle for each configured item.
+
+        The blacksmithing module now iterates through all items configured
+        in ``self.config.items``, crafting each one in sequence.  For
+        each item the recipe is selected based on its name and grade
+        preferences and icons specific to that item are used during
+        dismantling.
+        """
+        # Iterate over each item configuration
+        for item_cfg in getattr(self.config, "items", [self.config]):
+            try:
+                name = item_cfg.craft_item_name
+            except AttributeError:
+                # Backwards compatibility: config may be single item
+                name = getattr(self.config, "craft_item_name", "")
+            logger.info("Starting blacksmithing cycle for %s", name)
+            # 1. Move to forge
+            self.nav.move_to_station("forge")
+            time.sleep(1.0)
+            # 2. Ensure we are facing the forge by rotating camera until text appears
+            try:
+                self.nav.rotate_camera_until("кузнечное горнило", timeout=8.0)
+            except Exception:
+                # Even if detection fails, continue to interact with station
+                pass
+            # 3. Open crafting interface
+            self.open_crafting_interface()
+            # 4. Select recipe
+            self.select_recipe(name)
+            # 5. Initiate crafting
+            self.start_craft(item_cfg)
+            # 5. Collect items from output slots until bag is full
+            while True:
+                if not self.collect_items_from_output():
+                    # If items remain in output after collection, we assume bag is full
+                    self.handle_full_inventory(item_cfg)
+                    break
+                # Continue crafting next batch if output was cleared successfully
+                time.sleep(0.5)
+                # Optionally click "Создать" again
+                self.start_craft(item_cfg)
 
     # ----- Helper methods -----
     def open_crafting_interface(self) -> None:
@@ -85,8 +106,14 @@ class Blacksmithing(CraftingModule):
         except NotImplementedError:
             logger.warning("UI automation not implemented; cannot select recipe")
 
-    def start_craft(self) -> None:
-        """Locate and click the 'Создать' button to start crafting."""
+    def start_craft(self, item_cfg=None) -> None:
+        """Locate and click the 'Создать' button to start crafting.
+
+        Optionally accepts ``item_cfg`` which provides grade icon paths.  If
+        provided, the method looks for a template named "создать" in
+        ``item_cfg.grade_icons``; otherwise it falls back to a generic
+        approach.
+        """
         logger.info("Attempting to start crafting")
         try:
             # Take screenshot and find 'create' button
@@ -94,9 +121,22 @@ class Blacksmithing(CraftingModule):
         except NotImplementedError:
             logger.warning("Cannot take screenshot; assuming craft started")
             return
-        # Template(s) for 'Создать' can be provided in config.grade_icons
-        # or another config section; here we just reuse grade_icons for example.
-        templates = {"create": path for name, path in self.config.grade_icons.items() if name == "создать"}
+        # Determine templates from item configuration
+        templates = {}
+        if item_cfg is not None:
+            try:
+                for grade, path in item_cfg.grade_icons.items():
+                    if grade.lower() == "создать" and path:
+                        templates["create"] = path
+                        break
+            except Exception:
+                pass
+        # Fallback to config.grade_icons if no template found
+        if not templates and hasattr(self.config, "grade_icons"):
+            for grade, path in getattr(self.config, "grade_icons", {}).items():
+                if grade.lower() == "создать" and path:
+                    templates["create"] = path
+                    break
         if not templates:
             # Without explicit templates we cannot locate button reliably
             logger.debug("No templates provided for 'Создать'; falling back to keyboard")
@@ -126,29 +166,50 @@ class Blacksmithing(CraftingModule):
             (800, 350), (850, 350), (900, 350),
             (800, 400), (850, 400), (900, 400),
         ]
+        # Assume bag is not full initially
         bag_full = False
         for (x, y) in output_slots:
             try:
                 # Right‑click to move item to bag
                 self.ui.click(x, y, button="right")
-                time.sleep(0.2)
-                # Optionally, we could check if the item disappeared by taking a small screenshot
+                time.sleep(0.3)
+                # After moving, capture a small region around the slot to
+                # determine if the item disappeared.  A bright/empty slot
+                # typically has higher average brightness than a filled slot.
+                try:
+                    slot_img = self.ui.screenshot(region=(x - 15, y - 15, 30, 30))
+                except NotImplementedError:
+                    # Cannot take screenshot; assume collection succeeded
+                    continue
+                # Convert to grayscale and compute mean brightness
+                try:
+                    # Use Pillow methods to convert to grayscale
+                    gray = slot_img.convert("L")
+                    import numpy as _np  # local import
+                    mean_val = _np.array(gray).mean()
+                    # Heuristic threshold: if dark, item remains (inventory full)
+                    if mean_val < 80:
+                        bag_full = True
+                        logger.debug("Slot at (%s,%s) appears occupied after collection (mean=%.1f)", x, y, mean_val)
+                        break
+                except Exception:
+                    # If conversion fails, skip brightness check
+                    pass
             except NotImplementedError:
                 logger.warning("UI automation not available; cannot collect items")
                 return True
-        # To determine if items remained, we could sample pixel colours
-        # of the output slots and see if they are empty.  Here we simply
-        # return True (output cleared) as a placeholder.
+        # If any slot remained filled, return False (items remained; bag full)
         return not bag_full
 
-    def handle_full_inventory(self) -> None:
+    def handle_full_inventory(self, item_cfg=None) -> None:
         """Handle the situation where the inventory is full.
 
         Steps:
         1. Close crafting windows (press Esc).
         2. Rotate camera until 'дробилка' appears on screen.
         3. Move to crusher and interact (press E).
-        4. Open inventory and dismantle items based on grade preferences.
+        4. Open inventory and dismantle items based on the provided item's
+           grade preferences.
         5. Return to forge to continue crafting.
         """
         logger.info("Inventory appears full; initiating dismantling routine")
@@ -157,7 +218,7 @@ class Blacksmithing(CraftingModule):
         except NotImplementedError:
             pass
         # Rotate until crusher is found; timeout may be increased
-        found = self.nav.rotate_camera_until("дробилка", timeout=8.0)
+        self.nav.rotate_camera_until("дробилка", timeout=8.0)
         # Move to crusher regardless
         self.nav.move_to_station("crusher")
         # Interact with crusher (press E)
@@ -173,7 +234,7 @@ class Blacksmithing(CraftingModule):
             pass
         time.sleep(0.5)
         # Dismantle items
-        self.dismantle_items()
+        self.dismantle_items(item_cfg)
         # Close all windows and return to forge
         try:
             self.ui.press('esc')
@@ -181,8 +242,13 @@ class Blacksmithing(CraftingModule):
             pass
         self.nav.move_to_station("forge")
 
-    def dismantle_items(self) -> None:
-        """Find and dismantle items in inventory based on grade preferences."""
+    def dismantle_items(self, item_cfg=None) -> None:
+        """Find and dismantle items in inventory based on grade preferences.
+
+        This method now accepts an optional ``item_cfg`` parameter.  When
+        provided, the grade preferences and templates from that item are
+        used; otherwise it falls back to the global configuration.
+        """
         logger.info("Dismantling items of selected grades in inventory")
         # Define the region of the inventory to search for items.  In the
         # user's description, the player marks the inventory region
@@ -190,11 +256,35 @@ class Blacksmithing(CraftingModule):
         # a portion of the screen.  Adjust these coordinates to match
         # your client: (left, top, width, height)
         inventory_region = (1000, 200, 300, 400)
-        # Identify which grade templates to look for
-        for grade, send_to_crusher in self.config.grade_preferences.items():
+        # Determine grade preferences and templates from item configuration
+        if item_cfg is not None:
+            grade_prefs = item_cfg.grade_preferences
+            # Build or fetch templates for this item from ImageRecognition if available
+            # If ImageRecognition stores per-item templates, we could index them here.  As a fallback,
+            # use the global templates mapping.
+            templates_dict = getattr(self.img, 'item_templates', None)
+            item_index = None
+            # Attempt to determine index
+            if templates_dict is not None and hasattr(self.config, 'items'):
+                try:
+                    item_index = self.config.items.index(item_cfg)
+                except ValueError:
+                    item_index = None
+        else:
+            grade_prefs = getattr(self.config, 'grade_preferences', {})
+            templates_dict = None
+            item_index = None
+        for grade, send_to_crusher in grade_prefs.items():
             if not send_to_crusher:
                 continue
-            template = self.img._grade_templates.get(grade)
+            # Select template for this grade
+            template = None
+            if templates_dict is not None and item_index is not None:
+                tpl = templates_dict[item_index].get(grade)
+                template = tpl
+            if template is None:
+                # Fall back to global templates loaded in ImageRecognition
+                template = self.img._grade_templates.get(grade)
             if template is None:
                 logger.warning("No template loaded for grade '%s'; skipping", grade)
                 continue
